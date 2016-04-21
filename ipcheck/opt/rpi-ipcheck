@@ -1,0 +1,296 @@
+#!/bin/sh
+
+#########################################################################################
+#											#
+#					RPI-IPCHECK					#
+#											#
+# Description : Helper script for ipcheck.py Docker image for Raspberry Pi.		#
+# Author : AdZero (https://github.com/AdZero)						#
+# Version : 1.0.0									#
+#											#
+#########################################################################################
+
+####################
+# Script variables #
+####################
+
+LOG_PREFIX="RPI-IPCHECK"
+
+OPT_CONFIG=0
+OPT_HELP=0
+OPT_SCHEDULE=0
+OPT_PERIOD_MODE=0
+OPT_PERIOD_VALUE=0
+OPT_RUN=0
+OPT_EXECUTE=0
+
+SOURCE_CONFIG_URL="https://sourceforge.net/projects/ipcheck/files/ipcheck.conf/download"
+CONFIG_FILE_DEFAULT="/etc/ipcheck/ipcheck.default.conf"
+CONFIG_FILE="/etc/ipcheck/ipcheck.conf"
+DAT_FILE="/var/ipcheck/ipcheck.dat"
+RUN_SCRIPT="/opt/ipcheck/rpi-ipcheck -e"
+PYTHON_PATH="/usr/bin/python"
+IPCHECK_PATH="/opt/ipcheck/ipcheck.py"
+CRONTAB_FILE="/var/spool/cron/crontabs/root"
+
+PERIOD_MODE_DEFAULT="h"
+PERIOD_H_DEFAULT=1
+PERIOD_M_DEFAULT=5
+
+#############
+# Functions #
+#############
+
+#
+#print_usage : Displays script usage
+#
+print_usage()
+{
+	echo "rpi-ipcheck [-h] [-c] [-s [-p h|m] [-v 1-23|1-59]] [-e] [-r]"
+	echo 
+	echo "	-h : display this help"
+	echo "	-c : download ipcheck.py default configuration file and save it to '$CONFIG_FILE_DEFAULT'"
+	echo "	-s : schedule ipcheck.py execution"
+	echo "	-p : set execution period to hours (h) or minutes (m) (-s option is mandatory to use -p)"
+	echo "	     default value is '$PERIOD_MODE_DEFAULT'"
+	echo "	-v : set period value (-s option is mandatory to use -v)"
+	echo "	     valid value range is 1-23 (default is $PERIOD_H_DEFAULT) for hour period and 1-59 for minute period (default is $PERIOD_M_DEFAULT)"
+	echo "	-e : execute ipcheck.py with configuration file options"
+	echo "	-r : run the scheduler (schedule should exist or use -s option)"
+	echo
+}
+
+#
+# parse_options : Command line options parsing using getopts
+#
+parse_options()
+{
+	while getopts "chresp:v:" OPT; do
+		case $OPT in
+			c)
+				OPT_CONFIG=1
+				;;
+			h)
+				OPT_HELP=1
+				;;
+			r)
+				OPT_RUN=1
+				;;
+                        e)
+                                OPT_EXECUTE=1
+                                ;;
+			s)
+				OPT_SCHEDULE=1
+				;;
+			p)
+				OPT_PERIOD_MODE=1
+				IPCHECK_PERIOD_MODE="$OPTARG"
+				;;
+			v)
+				OPT_PERIOD_VALUE=1
+				IPCHECK_PERIOD=$OPTARG
+				;;
+    			\?)
+				echo "$LOG_PREFIX: Invalid option: -$OPTARG" >&2
+				;;
+		esac
+	done
+}
+
+#
+#check_options : Checks parsed options
+#
+check_options()
+{
+	usage=0
+	error=0
+
+	if [ $OPT_HELP -eq 1 ]; 
+	then
+		usage=1
+	elif [ $OPT_PERIOD_MODE -eq 1 ] || [ $OPT_PERIOD_VALUE -eq 1 ];
+	then
+		if [ $OPT_SCHEDULE -ne 1 ];
+		then
+			error=1
+			echo "-p or -v implies -s !"
+		else
+			#Checks period mode
+			if [ $OPT_PERIOD_MODE -eq 1 ] && [ ${IPCHECK_PERIOD_MODE:-"-"} != "h" ] && [ ${IPCHECK_PERIOD_MODE:-"-"} != "m" ];
+			then
+				error=1
+			elif [ $OPT_PERIOD_MODE -ne 1 ];
+			then
+				IPCHECK_PERIOD_MODE=$PERIOD_MODE_DEFAULT
+			fi
+
+			#Checks period value
+			if [ $OPT_PERIOD_VALUE -eq 1 ];
+			then
+				case $IPCHECK_PERIOD_MODE in
+					"h")
+				                if [ ${IPCHECK_PERIOD:-"-1"} -lt 1 -o ${IPCHECK_PERIOD:-"-1"} -gt 23 ];
+                				then
+							error=1
+						fi
+						;;
+					"m")
+						if [ ${IPCHECK_PERIOD:-"-1"} -lt 1 -o ${IPCHECK_PERIOD:-"-1"} -gt 59 ];
+						then
+							error=1
+						fi
+						;;
+					*)
+				esac
+			elif [ $OPT_PERIOD_VALUE -ne 1 ];
+			then
+                                case $IPCHECK_PERIOD_MODE in
+                                        "h")
+						IPCHECK_PERIOD=$PERIOD_H_DEFAULT
+						;;
+                                        "m")
+						IPCHECK_PERIOD=$PERIOD_M_DEFAULT
+                                                ;;
+                                        *)
+                                esac
+
+			fi
+		fi
+	fi
+
+	if [ $error -eq 1 ] || [ $usage -eq 1 ];
+	then 
+		if [ $error -eq 1 ];
+		then
+			echo "$LOG_PREFIX: Error. Check your parameters."
+			echo
+		fi
+
+		print_usage
+		exit $error
+	fi
+}
+
+#
+#get_default_configuration: Downloads default configuration file from ipcheck repository
+#
+get_default_configuration()
+{
+	#Getting OpenSSL for https download
+	apk update > /dev/null 2>&1
+	apk add openssl > /dev/null 2>&1
+
+	echo "$LOG_PREFIX: Retrieving default config file ."
+	wget -q -O $CONFIG_FILE_DEFAULT $SOURCE_CONFIG_URL
+	if [ $? -eq 0 ]
+	then
+		echo "$LOG_PREFIX: Default configuration saved in '$CONFIG_FILE_DEFAULT'"
+		echo "$LOG_PREFIX: Please edit default configuration file and rename it to '$CONFIG_FILE' in order to run ipcheck.py"
+	else
+		echo "$LOG_PREFIX: Can't retrieve default configuration from $SOURCE_CONFIG_URL"
+		echo "$LOG_PREFIX: Check your connection."
+	fi
+
+	#Removing OpenSSL
+	apk del openssl > /dev/null 2>&1
+	#Clearing APK cache
+	rm -rf /var/cache/apk/*
+}
+
+#
+#schedule_ipcheck: Schedules ipcheck.py execution in crontab file
+#
+schedule_ipcheck()
+{
+	#Set crontab entry for rpi-ipcheck
+	echo "$LOG_PREFIX: Setting rpi-ipcheck crontab entry."
+	if [ $IPCHECK_PERIOD_MODE = "h" ];
+	then
+		echo "0 */$IPCHECK_PERIOD       *       *       *       $RUN_SCRIPT" > $CRONTAB_FILE
+	elif [ $IPCHECK_PERIOD_MODE = "m" ];
+	then
+		echo "*/$IPCHECK_PERIOD        *       *       *       *       $RUN_SCRIPT" > $CRONTAB_FILE
+	fi
+	echo "" >> $CRONTAB_FILE
+}
+
+#
+#run_ipcheck: executes ipcheck.py with configuration file options
+#
+run_ipcheck()
+{
+	if [ -f $CONFIG_FILE ];
+	then
+		echo "$LOG_PREFIX: Configuration file found at '$CONFIG_FILE'."
+
+		#Configuration file exists, ipcheck can be executed.
+		if [ -f $DAT_FILE ];
+		then
+			echo "$LOG_PREFIX: Invoking ipcheck.py"
+			$PYTHON_PATH $IPCHECK_PATH -c --config $CONFIG_FILE
+		else
+			#DAT file missing , using --makedat switch to create it
+			echo "$LOG_PREFIX: Invoking ipcheck.py for the first time"
+			$PYTHON_PATH $IPCHECK_PATH -c --makedat --config $CONFIG_FILE
+		fi
+	else
+		echo "$LOG_PREFIX: Configuration file missing."
+		if [ -f $CONFIG_FILE_DEFAULT ];
+		then
+			echo "$LOG_PREFIX: Please edit default configuration file and rename it to '$CONFIG_FILE' in order to run ipcheck.py"
+		fi
+	fi
+}
+
+#
+#run_cron: Launches cron daemon in foreground
+#
+run_cron()
+{
+	/bin/busybox crond -f
+}
+
+###############
+# Script body #
+###############
+
+if [ $# -eq 0 ];
+then 
+	print_usage    
+	exit 0
+fi
+
+#Parsing command line options
+parse_options $@ 
+#Checking options and displaying usage if necessary
+check_options
+
+echo "$LOG_PREFIX ($(date +"%Y-%m-%d %H:%M:%S"))"
+
+#Downloads default configuration file if option is set
+if [ $OPT_CONFIG -eq 1 ];
+then
+	get_default_configuration
+fi
+
+#Sets schedule if option is set
+if [ $OPT_SCHEDULE -eq 1 ];
+then
+	schedule_ipcheck
+fi
+
+#Executes ipcheck.py once if option is set
+if [ $OPT_EXECUTE -eq 1 ];
+then
+	run_ipcheck
+fi
+
+#Launches cron daemon if option is set
+if [ $OPT_RUN -eq 1 ];
+then
+	if [ -z "$(cat $CRONTAB_FILE | grep "$RUN_SCRIPT")" ]; then
+		echo "$LOG_PREFIX: crontab entry is not set. Use -s option to schedule execution. Exiting."
+	else
+		run_cron
+	fi
+fi
