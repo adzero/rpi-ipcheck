@@ -133,7 +133,7 @@ Otherwise, follow instructions in logs to fix any problem.
 ### Clone git repository
 
 ```bash
-$ git clone https://gitlab.com/adzero/rpi-ipcheck.git
+$ git clone https://github.com/adzero/rpi-ipcheck.git
 ```
 
 ### Build Docker image
