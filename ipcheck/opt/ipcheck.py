@@ -2227,7 +2227,7 @@ def _main(argv):
 "is-a-chef.org",
 "is-a-conservative.com",
 "is-a-cpa.com",
-"is-a-cubicle-slave.com",
+"is-a-cubicle-subordinate.com",
 "is-a-democrat.com",
 "is-a-designer.com",
 "is-a-doctor.com",
